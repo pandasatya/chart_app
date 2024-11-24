@@ -8,10 +8,7 @@ from datetime import datetime
 
 
 # Initialize OpenAI API Key
-#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "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"))
-
-openai.api_key = os.getenv("OPENAI_API_KEY", "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")
-
+openai.api_key=""
 
 
 def read_frappe_table(table_name: str):
