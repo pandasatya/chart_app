@@ -227,3 +227,82 @@ def prepare_chart_data(products):
     }
 
     return chart_data
+
+@frappe.whitelist()
+def get_table_data(table_name=None):
+    if table_name:
+        data=frappe.db.get_all(table_name,fields=['*'])
+        return convert_dynamic_json_to_chart_dataset(data)
+
+
+def convert_dynamic_json_to_chart_dataset(json_data):
+    """
+    Convert a dynamic list of JSON data into a chart-compatible dataset,
+    excluding specific fields from being used as labels or values.
+
+    Args:
+        json_data (list): A list of dictionaries containing the JSON data.
+
+    Returns:
+        dict: A dictionary containing labels and datasets for the chart.
+    """
+    if not json_data or not isinstance(json_data, list):
+        print("Invalid or empty JSON data.")
+        return {"labels": [], "datasets": []}  # Return empty dataset for invalid input
+
+    # Fields to exclude
+    excluded_fields = {
+        "name", "creation", "modified", "modified_by", "owner",
+        "docstatus", "idx"
+    }
+
+    # Identify label and value fields dynamically
+    sample = json_data[0]  # Take the first record as a sample
+    label_field = None
+    value_field = None
+
+    for key, value in sample.items():
+        # Skip excluded fields and fields starting with an underscore
+        # if key in excluded_fields or key.startswith("_"):
+        #     frappe.log_error("key",key)
+        #     continue
+
+        # frappe.log_error("key1",key)
+
+        if label_field is None and isinstance(value, (str, int, float)):
+            label_field = key  # First non-excluded string or identifier-like field
+            frappe.log_error("label_field",label_field)
+        elif value_field is None and isinstance(value, (int, float)):
+            value_field = key  # First non-excluded numeric field
+            frappe.log_error("value_field",value_field)
+        if label_field and value_field:
+            break  # Stop when both fields are found
+
+    # Debug: Print the selected fields
+    frappe.log_error("s1",f"Label Field: {label_field}, Value Field: {value_field}")
+
+    # Fallback if no suitable fields are found
+    if not label_field or not value_field:
+        frappe.log_error("s2","No suitable fields found for labels or values.")
+        return {"labels": [], "datasets": []}
+
+    # Extract labels and values from the JSON data
+    labels = [str(item.get(label_field, "")) for item in json_data]
+    values = [float(item.get(value_field, 0)) for item in json_data]
+
+    # Debug: Print extracted labels and values
+    frappe.log_error("s3",f"Labels: {labels}")
+    frappe.log_error("s4",f"Values: {values}")
+
+    # Build the chart dataset
+    chart_dataset = {
+        "labels": labels,
+        "datasets": [
+            {
+                "name": value_field,  # Use the value field as the dataset name
+                "values": values,    # Values for the chart
+            }
+        ]
+    }
+
+    return chart_dataset
