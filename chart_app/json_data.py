@@ -228,11 +228,97 @@ def prepare_chart_data(products):
 
     return chart_data
 
-@frappe.whitelist()
-def get_table_data(table_name=None):
+@frappe.whitelist(allow_guest=True)
+def get_table_data(table_name=None, file_upload=False):
     if table_name:
-        data=frappe.db.get_all(table_name,fields=['*'])
-        return convert_dynamic_json_to_chart_dataset(data)
+        if file_upload:
+            return convert_uploaded_data_to_chart_dataset(table_name)
+        else:
+            data=frappe.db.get_all(table_name,fields=['*'])
+            return convert_dynamic_json_to_chart_dataset(data)
+
+
+def convert_uploaded_data_to_chart_dataset(table_name):
+    data_source = frappe.get_doc("Insights Data Source", "File Uploads")
+    preview = data_source.get_table_preview(table_name)
+    
+    if not preview or not isinstance(preview, dict) or 'data' not in preview:
+        print("Invalid or empty preview data.")
+        return {"labels": [], "datasets": []}
+    
+    data_rows = preview['data']
+    if not data_rows or len(data_rows) < 2:  # Need at least headers + one data row
+        print("Not enough data rows in preview.")
+        return {"labels": [], "datasets": []}
+    
+    # First row contains column headers
+    headers = data_rows[0]
+    
+    # Find suitable label and value fields
+    label_field_index = None
+    value_field_index = None
+    
+    # Try to identify appropriate fields - prefer string for label and number for value
+    for i, header in enumerate(headers):
+        # Check first data row to determine type
+        if len(data_rows) > 1:
+            value = data_rows[1][i]
+            
+            # If label field not found and this looks like a string
+            if label_field_index is None and isinstance(value, str) and not value.isdigit():
+                label_field_index = i
+                
+            # If value field not found and this looks like a number
+            if value_field_index is None and (isinstance(value, (int, float)) or 
+                                             (isinstance(value, str) and value.isdigit())):
+                value_field_index = i
+                
+        if label_field_index is not None and value_field_index is not None:
+            break
+    
+    # If we couldn't find appropriate fields, use first column as label and second as value
+    if label_field_index is None:
+        label_field_index = 0
+    if value_field_index is None:
+        # Try to find the first numeric column after the label column
+        for i in range(len(headers)):
+            if i != label_field_index and i < len(data_rows[1]):
+                try:
+                    float(data_rows[1][i])
+                    value_field_index = i
+                    break
+                except (ValueError, TypeError):
+                    pass
+        
+        # If still no value field, just use the next available column
+        if value_field_index is None:
+            value_field_index = 1 if label_field_index != 1 else 2
+            if value_field_index >= len(headers):
+                value_field_index = 0 if label_field_index != 0 else 1
+    
+    # Extract labels and values from the data rows (skipping the header row)
+    labels = []
+    values = []
+    
+    for row in data_rows[1:]:  # Skip headers
+        if len(row) > max(label_field_index, value_field_index):
+            labels.append(str(row[label_field_index]))
+            try:
+                values.append(float(row[value_field_index]))
+            except (ValueError, TypeError):
+                values.append(0)  # Default to 0 for non-numeric values
+    
+    # Build the chart dataset
+    chart_dataset = {
+        "labels": labels,
+        "datasets": [
+            {
+                "name": headers[value_field_index],
+                "values": values,
+            }
+        ]
+    }
+    return chart_dataset
 
 
 def convert_dynamic_json_to_chart_dataset(json_data):
@@ -263,9 +349,9 @@ def convert_dynamic_json_to_chart_dataset(json_data):
 
     for key, value in sample.items():
         # Skip excluded fields and fields starting with an underscore
-        # if key in excluded_fields or key.startswith("_"):
-        #     frappe.log_error("key",key)
-        #     continue
+        if key in excluded_fields or key.startswith("_"):
+            frappe.log_error("key",key)
+            continue
 
         # frappe.log_error("key1",key)
 
@@ -277,7 +363,7 @@ def convert_dynamic_json_to_chart_dataset(json_data):
             frappe.log_error("value_field",value_field)
         if label_field and value_field:
             break  # Stop when both fields are found
-
+        
     # Debug: Print the selected fields
     frappe.log_error("s1",f"Label Field: {label_field}, Value Field: {value_field}")
 
