@@ -5,6 +5,11 @@ app_description = "Chart App"
 app_email = "satya@gmail.com"
 app_license = "mit"
 
+api_whitelist = [
+    "chart_app.utils.get_data"
+]
+
+
 # Apps
 # ------------------
 

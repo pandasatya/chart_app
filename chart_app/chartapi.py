@@ -2,14 +2,14 @@ import frappe
 import pandas as pd
 import os
 import re
-import openai
+from openai import OpenAI
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 
 # Initialize OpenAI API Key
-openai.api_key=""
-
+#openai.api_key=""
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "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"))
 
 def read_frappe_table(table_name: str):
     try:
@@ -108,7 +108,7 @@ def get_sql_query(user_query: str, table_schema: str, model: str, system_prompt:
     ]
     
     try:
-        response = openai.ChatCompletion.create(
+        response =client.chat.completions.create(
             model=model,
             messages=messages
         )

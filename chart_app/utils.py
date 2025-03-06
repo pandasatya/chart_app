@@ -5,7 +5,8 @@ from frappe.utils.file_manager import save_file
 from frappe.utils import random_string
 import json
 
-@frappe.whitelist(allow_guest=True)  # allow_guest if you want to call it without authentication
+
+@frappe.whitelist()  # allow_guest if you want to call it without authentication
 def upload_and_process_file():
     # Get the uploaded file
     if 'file' not in frappe.request.files:
