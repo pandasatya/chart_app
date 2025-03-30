@@ -4,6 +4,24 @@ import pandas as pd
 from frappe.utils.file_manager import save_file
 from frappe.utils import random_string
 import json
+from chart_app.excel_process import upload_and_process_excel
+
+
+
+@frappe.whitelist()
+def handle_file_upload():
+    if 'file' not in frappe.request.files:
+        frappe.throw("File is required")
+
+    file = frappe.request.files['file']
+    file_extension = os.path.splitext(file.filename)[1].lower()
+
+    if file_extension == ".csv":
+        return upload_and_process_file()
+    elif file_extension in [".xlsx", ".xls"]:
+        return upload_and_process_excel(file)
+    else:
+        frappe.throw("Invalid file type. Please upload a CSV or Excel file.")
 
 
 @frappe.whitelist()  # allow_guest if you want to call it without authentication
@@ -39,11 +57,16 @@ def upload_and_process_file():
     chart_data = prepare_chart_data(df)
 
     # Return the chart data and the name of the newly created DocType
-    return json.dumps({
+    data=json.dumps({
         "status": "success",
         "doctype": doctype_name,  # Return the name of the newly created DocType
         "chart_data": chart_data  # Return the formatted data for charting
     })
+    json_string = data
+    return json.loads(json_string)
+    #datas["message"] = json.loads(datas["message"])
+    #formatted_json = json.dumps(datas, indent=2)
+    #return datas
 
 import re
 

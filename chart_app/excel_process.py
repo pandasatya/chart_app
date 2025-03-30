@@ -1,15 +1,14 @@
 import frappe
 import os
+import json
 import pandas as pd
+import re
+import requests
 from frappe.utils.file_manager import save_file
 from frappe.utils import random_string
-import json
-import re
-import openai
-import requests
 
-@frappe.whitelist(allow_guest=True)  # allow_guest if you want to call it without authentication
-def upload_and_process_file():
+@frappe.whitelist()
+def upload_and_process_excel():
     """Handles file upload, processes Excel file, creates DocType, and returns chart data."""
     
     # Check if file is uploaded
@@ -34,7 +33,7 @@ def upload_and_process_file():
     except Exception as e:
         frappe.throw(f"Error reading the Excel file: {str(e)}")
 
-    columns = list(df.columns)
+    columns = [str(col) for col in df.columns]  # Convert all column names to strings
     data = df.to_dict(orient="records")
 
     # Create a new DocType dynamically and insert data
@@ -47,8 +46,8 @@ def upload_and_process_file():
     # Return success response
     return json.dumps({
         "status": "success",
-        "doctype": doctype_name,  # Name of the created DocType
-        "chart_data": chart_data  # Data formatted for charting
+        "doctype": doctype_name,
+        "chart_data": chart_data
     })
 
 def create_dynamic_doctype(file_name, columns):
@@ -60,17 +59,18 @@ def create_dynamic_doctype(file_name, columns):
     if not frappe.db.exists("DocType", doctype_name):
         fields = []
         for col in columns:
-            sanitized_fieldname = re.sub(r'\W+', '_', col.lower()).strip('_')
+            sanitized_fieldname = re.sub(r'\W+', '_', str(col).lower()).strip('_')
 
             # Ensure the fieldname doesn't start with a number
-            if sanitized_fieldname[0].isdigit():
+            if sanitized_fieldname and sanitized_fieldname[0].isdigit():
                 sanitized_fieldname = f"_{sanitized_fieldname}"
 
-            fields.append({
-                "fieldname": sanitized_fieldname,
-                "fieldtype": "Data",
-                "label": col
-            })
+            if sanitized_fieldname:
+                fields.append({
+                    "fieldname": sanitized_fieldname,
+                    "fieldtype": "Data",
+                    "label": col
+                })
 
         doc = frappe.get_doc({
             "doctype": "DocType",
@@ -85,6 +85,16 @@ def create_dynamic_doctype(file_name, columns):
 
     return doctype_name
 
+#def insert_data_into_doctype(doctype_name, data):
+#    """
+#    Insert Excel data into the dynamically created DocType.
+#    """
+#    for row in data:
+#        doc = frappe.get_doc({"doctype": doctype_name})
+#        for field, value in row.items():
+#            doc.set(str(field).lower().replace(" ", "_"), value)
+#        doc.insert()
+
 def insert_data_into_doctype(doctype_name, data):
     """
     Insert Excel data into the dynamically created DocType.
@@ -92,8 +102,14 @@ def insert_data_into_doctype(doctype_name, data):
     for row in data:
         doc = frappe.get_doc({"doctype": doctype_name})
         for field, value in row.items():
-            doc.set(field.lower().replace(" ", "_"), value)
+            # Convert NaN values to None
+            if pd.isna(value):  
+                value = None  
+
+            doc.set(str(field).lower().replace(" ", "_"), value)
+
         doc.insert()
+
 
 def prepare_chart_data(df):
     """
@@ -123,14 +139,15 @@ def get_random_color():
     return f'rgba({random.randint(0, 255)}, {random.randint(0, 255)}, {random.randint(0, 255)}, 0.5)'
 
 # OpenAI SQL Query Generation Functions
-openai.api_key = frappe.db.get_single_value('System Settings', 'openai_api_key')
+openai_api_token = frappe.db.get_single_value('Digital Insights Settings', 'open_api_token')
 
 @frappe.whitelist(allow_guest=True)
 def get_dataset(user_query):
     """
     Fetch dataset using OpenAI-generated SQL query.
     """
-    table_schema = get_table_schema("Data_saless_G7cGd")
+    doctype_name = frappe.db.get_value("Tab Doctype", {}, "name", order_by="creation desc")
+    table_schema = get_table_schema(doctype_name)
     sql_query = get_openai_response(user_query, table_schema)
     return sql_query
 
@@ -141,7 +158,8 @@ def get_table_schema(doctype):
     table_name = f"tab{doctype}"
     schema = frappe.db.sql(f"DESCRIBE `{table_name}`", as_dict=True)
     
-    table_schema = f'"""\nTable: {table_name}\nColumns:'
+    table_schema = f"""Table: {table_name}\nColumns:"""
+    
     for column in schema:
         column_type = column['Type'].upper()
         if 'varchar' in column_type: column_type = 'VARCHAR'
@@ -152,19 +170,14 @@ def get_table_schema(doctype):
         
         table_schema += f'\n- {column["Field"]} ({column_type})'
     
-    return table_schema + '\n"""'
+    return table_schema
 
 def get_openai_response(user_query, table_schema):
     """
     Use OpenAI API to generate SQL query from natural language.
     """
     headers = {
-        "Authorization": f"Bearer {openai.api_key}",
+        "Authorization": f"Bearer {openai_api_token}",
     }
-
     response = requests.get("https://api.openai.com/v1/dashboard/billing/usage", headers=headers)
-
-    if response.status_code == 200:
-        return response.json()
-    else:
-        return f"Error: {response.status_code} - {response.text}"
+    return response.json() if response.status_code == 200 else f"Error: {response.status_code} - {response.text}"
