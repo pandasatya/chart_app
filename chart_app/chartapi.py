@@ -8,14 +8,16 @@ from datetime import datetime
 
 
 # Initialize OpenAI API Key
-#openai.api_key=""
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "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"))
-
-def read_frappe_table(table_name: str):
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY",frappe.db.get_single_value('Digital Insights Settings', 'open_api_token') ))
+def read_frappe_table(table_name: str,file_upload: bool):
     try:
+        query=""
         # SQL query to fetch all data from the specified table
-        query = f"SELECT * FROM `tab{table_name}`"
-        
+        if file_upload == True:
+            query = f"SELECT * FROM `{table_name}`"
+        else:
+            query = f"SELECT * FROM `tab{table_name}`"
+        frappe.log_error("query",query)
         # Execute the SQL query
         data = frappe.db.sql(query, as_dict=True)
         
@@ -41,10 +43,16 @@ def read_frappe_table(table_name: str):
 
 
 # Generate a table schema string from a DataFrame
-def get_table_schema(df,table_name):
+def get_table_schema(df,table_name:str,file_upload:bool=False):
     # Prepare the table name (tables in Frappe are prefixed with 'tab')
+    #table_name=""
+    #if file_upload== True:
+    #    table_name = f"{table_name}"
+    #else:
     table_name = f"tab{table_name}"
-    
+    frappe.log_error("get_table_schema",table_name)
+    #if file_upload == True:
+    #    table_name=table_name
     # Execute SQL query to get the table schema
     schema = frappe.db.sql(f"DESCRIBE `{table_name}`", as_dict=True)
     
@@ -108,8 +116,9 @@ def get_sql_query(user_query: str, table_schema: str, model: str, system_prompt:
     ]
     
     try:
+        frappe.log_error("token",frappe.db.get_single_value('Digital Insights Settings', 'open_api_token') )
         response =client.chat.completions.create(
-            model=model,
+            model="gpt-4o-mini",
             messages=messages
         )
         sql_query = response.choices[0].message.content.strip()
@@ -181,14 +190,15 @@ def analyze_sql_query(sql_query: str) -> Dict[str, Any]:
 
 # Main function to process the Frappe table and generate SQL query
 @frappe.whitelist(allow_guest=True)
-def main_parse_frappe(user_query: str, is_new_data_source: bool,table_name:str, model: str = "gpt-3.5-turbo", system_prompt: Optional[str] = None,
+def main_parse_frappe(user_query: str, is_new_data_source: bool,table_name:str,file_upload:bool=False, model: str = "gpt-3.5-turbo", system_prompt: Optional[str] = None,
                       user_prompt_template: Optional[str] = None) -> Dict[str, Any]:
     try:
         # Read Frappe table instead of file
         table_name = table_name
-        df, table_name = read_frappe_table(table_name)
+        frappe.log_error("table_name",table_name)
+        df, table_name = read_frappe_table(table_name,file_upload)
         
-        table_schema = get_table_schema(df, table_name)
+        table_schema = get_table_schema(df, table_name,file_upload)
         
 
         # Set default prompts if not provided

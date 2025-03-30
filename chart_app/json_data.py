@@ -231,17 +231,98 @@ def prepare_chart_data(products):
 @frappe.whitelist(allow_guest=True)
 def get_table_data(table_name=None, file_upload=False):
     if table_name:
-        if file_upload:
+        import json
+        if json.loads(file_upload.lower()):
+            frappe.log_error("file_upload",type(json.loads(file_upload.lower())))
             return convert_uploaded_data_to_chart_dataset(table_name)
         else:
             data=frappe.db.get_all(table_name,fields=['*'])
             return convert_dynamic_json_to_chart_dataset(data)
 
 
+
+import re
+import frappe
+
+def sanitize_column_name(column_name):
+    """Sanitize column names to be SQL-compliant."""
+    column_name = re.sub(r'[\s\.]', '_', column_name)  # Replace spaces and dots with underscores
+
+    if column_name[0].isdigit():  # If column starts with a number, prefix it
+        column_name = "_" + column_name
+
+    return column_name
+
+def table_exists(table_name):
+    """Check if a table already exists in the database."""
+    existing_tables = frappe.db.sql(f"SHOW TABLES LIKE 'tab{table_name}'", as_dict=False)
+    return bool(existing_tables)
+
+@frappe.whitelist()
+def create_table_from_insights_data(source_name, table_name):
+    data_source = frappe.get_doc("Insights Data Source", source_name)
+    columns = data_source.get_table_columns(table_name)
+
+    # Sanitize column names
+    column_name_mapping = {col["column"]: sanitize_column_name(col["column"]) for col in columns}
+    column_names = list(column_name_mapping.values())
+
+    frappe.log_error("Column Names", column_names)
+
+    if not table_exists(table_name):
+        # Commit any pending transactions before executing DDL
+        frappe.db.commit()
+
+        # Define column types (assuming all are VARCHAR for now; modify as needed)
+        column_definitions = ", ".join([f"`{col}` VARCHAR(255)" for col in column_names])
+
+        # Create table if it doesn't exist
+        create_table_query = f"""
+        CREATE TABLE `tab{table_name}` (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            {column_definitions}
+        )
+        """
+        frappe.db.sql(create_table_query)
+        frappe.db.commit()  # Explicit commit after table creation
+        frappe.log_error("Table Created", f"{table_name} has been created.")
+    else:
+        frappe.log_error("Table Exists", f"{table_name} already exists, skipping creation.")
+
+    # Fetch data from the source
+    preview = data_source.get_table_preview(table_name)
+    data = preview.get("data", [])  # Ensure we get a list
+
+    frappe.log_error("Data", data)
+    frappe.log_error("Column", column_names)
+
+    if data and isinstance(data[0], list):
+        formatted_columns = ", ".join([f"`{col}`" for col in column_names])
+        placeholders = ", ".join(["%s"] * len(column_names))
+        
+        frappe.log_error("Formatted Columns", formatted_columns)
+        frappe.log_error("Placeholders", placeholders)
+
+        insert_query = f"INSERT INTO `tab{table_name}` ({formatted_columns}) VALUES ({placeholders})"
+        frappe.log_error("Insert Query", insert_query)
+
+        for row in data:
+            row_values = list(row)  # Ensure correct row format
+            frappe.db.sql(insert_query, tuple(row_values))
+
+        frappe.db.commit()  # Commit inserted rows
+
+    return {"message": f"Table `tab{table_name}` processed. {len(data)} rows inserted successfully!"}
+
+
+
+
+
 def convert_uploaded_data_to_chart_dataset(table_name):
     data_source = frappe.get_doc("Insights Data Source", "File Uploads")
     preview = data_source.get_table_preview(table_name)
-    
+    create_table_from_insights_data("File Uploads", table_name)
+    frappe.log_error("convert_uploaded_data_to_chart_datase",preview)
     if not preview or not isinstance(preview, dict) or 'data' not in preview:
         print("Invalid or empty preview data.")
         return {"labels": [], "datasets": []}
