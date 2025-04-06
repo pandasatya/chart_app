@@ -6,8 +6,217 @@ from frappe.utils import random_string
 import json
 from chart_app.excel_process import upload_and_process_excel
 
+@frappe.whitelist()
+def upload_and_process_file():
+    # Get the uploaded file
+    if 'file' not in frappe.request.files:
+        frappe.throw("File is required")
 
+    file = frappe.request.files['file']
+    file_name = file.filename
+    file_extension = os.path.splitext(file_name)[1].lower()
 
+    # Save the uploaded file temporarily in the private/files folder
+    file_doc = save_file(file_name, file.read(), "File", random_string(10), is_private=1)
+
+    # Full path to the uploaded file
+    file_path = os.path.join(frappe.get_site_path(), 'private', 'files', file_doc.file_name)
+
+    # Read the file into a DataFrame based on file type
+    df = None
+    
+    try:
+        if file_extension in ['.csv']:
+            # Try multiple approaches for CSV files
+            encoding_options = ['utf-8', 'ISO-8859-1', 'latin1', 'cp1252']
+            parser_error = None
+            
+            for encoding in encoding_options:
+                try:
+                    # Try with different delimiters and error handling
+                    df = pd.read_csv(
+                        file_path, 
+                        encoding=encoding,
+                        on_bad_lines='skip',  # Skip problematic lines
+                        sep=None,  # Auto-detect separator
+                        engine='python'  # More flexible python engine
+                    )
+                    break  # If successful, exit the loop
+                except UnicodeDecodeError:
+                    continue  # Try next encoding
+                except pd.errors.ParserError as e:
+                    parser_error = str(e)
+                    continue  # Try next encoding
+                except Exception as e:
+                    parser_error = str(e)
+                    continue  # Try next encoding
+            
+            # If we couldn't parse with any encoding, try a more aggressive approach
+            if df is None:
+                try:
+                    # Try with the C engine and a specific delimiter
+                    df = pd.read_csv(
+                        file_path,
+                        encoding='ISO-8859-1',  # Most permissive encoding
+                        sep=',',               # Explicitly use comma
+                        quoting=3,             # QUOTE_NONE
+                        engine='c'             # Faster C engine
+                    )
+                except Exception as e:
+                    if parser_error:
+                        frappe.throw(f"Could not parse CSV file: {parser_error}")
+                    else:
+                        frappe.throw(f"Error reading CSV file: {str(e)}")
+                        
+        elif file_extension in ['.xlsx', '.xls']:
+            try:
+                # For Excel files, try with different engines
+                df = pd.read_excel(file_path, engine='openpyxl')
+            except Exception as e:
+                try:
+                    # If openpyxl fails, try with xlrd
+                    df = pd.read_excel(file_path, engine='xlrd')
+                except Exception as e2:
+                    frappe.throw(f"Error reading Excel file: {str(e2)}")
+        else:
+            frappe.throw(f"Unsupported file format: {file_extension}. Please upload a CSV or Excel file.")
+    
+    except Exception as e:
+        frappe.throw(f"Unexpected error processing file: {str(e)}")
+    
+    # If still None, we couldn't process the file
+    if df is None:
+        frappe.throw("Unable to process the file. Please check the file format and try again.")
+    
+    # Clean up column names to ensure they're strings
+    df.columns = df.columns.astype(str)
+    
+    # Remove any completely empty columns or rows
+    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+    
+    columns = list(df.columns)
+    data = df.to_dict(orient="records")
+
+    # Dynamically create a DocType and insert data
+    doctype_name = create_dynamic_doctype(file_name, columns)
+    insert_data_into_doctype(doctype_name, data)
+
+    # Prepare data for chart
+    chart_data = prepare_chart_data(df)
+
+    # Return the chart data and the name of the newly created DocType
+    return json.dumps({
+        "status": "success",
+        "doctype": doctype_name,  # Return the name of the newly created DocType
+        "chart_data": chart_data,  # Return the formatted data for charting
+        "columns": columns,        # Return the column names
+        "row_count": len(data)     # Return the number of rows processed
+    })
+
+import re
+
+def create_dynamic_doctype(file_name, columns):
+    """
+    Create a new DocType based on the columns of the uploaded file.
+    Sanitize the columns to remove any special characters that aren't allowed in fieldnames.
+    """
+    # Remove any file extension (.csv, .xlsx, .xls) from the filename
+    base_name = os.path.splitext(file_name)[0]
+    # Further sanitize the base name
+    base_name = re.sub(r'\W+', '_', base_name)
+    doctype_name = f"Data_{base_name}_{random_string(5)}"
+    
+    if not frappe.db.exists("DocType", doctype_name):
+        # Sanitize the columns to be valid fieldnames
+        fields = []
+        used_fieldnames = set()  # Track used fieldnames to avoid duplicates
+        
+        for col in columns:
+            # Ensure column name is a string and has a reasonable length
+            col_str = str(col)[:140]  # Limit length to avoid issues
+            
+            sanitized_fieldname = re.sub(r'\W+', '_', col_str.lower())  # Replace special characters with underscores
+            sanitized_fieldname = sanitized_fieldname.strip('_')  # Remove leading/trailing underscores
+
+            # Ensure the fieldname doesn't start with a number
+            if sanitized_fieldname and sanitized_fieldname[0].isdigit():
+                sanitized_fieldname = f"_{sanitized_fieldname}"
+                
+            # Handle empty or invalid fieldnames
+            if not sanitized_fieldname:
+                sanitized_fieldname = f"field_{len(fields)}"
+                
+            # Ensure fieldname is unique
+            original_fieldname = sanitized_fieldname
+            counter = 1
+            while sanitized_fieldname in used_fieldnames:
+                sanitized_fieldname = f"{original_fieldname}_{counter}"
+                counter += 1
+                
+            used_fieldnames.add(sanitized_fieldname)
+
+            fields.append({
+                "fieldname": sanitized_fieldname,
+                "fieldtype": "Data",
+                "label": col_str
+            })
+
+        doc = frappe.get_doc({
+            "doctype": "DocType",
+            "name": doctype_name,
+            "module": "Custom",
+            "custom": 1,
+            "fields": fields,
+            "autoname": "autoincrement",
+            "permissions": [{"role": "System Manager", "read": 1, "write": 1, "create": 1}]
+        })
+        
+        try:
+            doc.insert()
+        except Exception as e:
+            frappe.log_error(f"Error creating DocType {doctype_name}: {str(e)}")
+            frappe.throw(f"Error creating DocType: {str(e)}")
+
+    return doctype_name
+
+def insert_data_into_doctype(doctype_name, data):
+    """
+    Insert data into the newly created DocType dynamically.
+    """
+    doctype_fields = frappe.get_meta(doctype_name).fields
+    field_map = {field.label: field.fieldname for field in doctype_fields if field.fieldtype == "Data"}
+    
+    for row in data:
+        try:
+            doc = frappe.get_doc({"doctype": doctype_name})
+            
+            for field, value in row.items():
+                # Handle NaN values from pandas DataFrame
+                if pd.isna(value):
+                    value = None
+                elif isinstance(value, (float, int)):
+                    # Convert numeric values to strings to avoid potential issues
+                    value = str(value)
+                    
+                # Use the fieldname mapping from labels to ensure correct field assignment
+                if field in field_map:
+                    doc.set(field_map[field], value)
+                else:
+                    # Fallback to direct setting with sanitized field name
+                    sanitized_field = re.sub(r'\W+', '_', str(field).lower()).strip('_')
+                    if sanitized_field and sanitized_field[0].isdigit():
+                        sanitized_field = f"_{sanitized_field}"
+                    
+                    if sanitized_field and hasattr(doc, sanitized_field):
+                        doc.set(sanitized_field, value)
+            
+            doc.insert(ignore_permissions=True)
+        except Exception as e:
+            frappe.log_error(f"Error inserting row into {doctype_name}: {str(e)}")
+            # Continue with next row instead of failing completely
+            continue
+        
+        
 @frappe.whitelist()
 def handle_file_upload():
     if 'file' not in frappe.request.files:
@@ -24,101 +233,101 @@ def handle_file_upload():
         frappe.throw("Invalid file type. Please upload a CSV or Excel file.")
 
 
-@frappe.whitelist()  # allow_guest if you want to call it without authentication
-def upload_and_process_file():
-    # Get the uploaded file
-    if 'file' not in frappe.request.files:
-        frappe.throw("File is required")
+# @frappe.whitelist()  # allow_guest if you want to call it without authentication
+# def upload_and_process_file():
+#     # Get the uploaded file
+#     if 'file' not in frappe.request.files:
+#         frappe.throw("File is required")
 
-    file = frappe.request.files['file']
+#     file = frappe.request.files['file']
 
-    # Save the uploaded file temporarily in the private/files folder
-    file_doc = save_file(file.filename, file.read(), "File", random_string(10), is_private=1)
+#     # Save the uploaded file temporarily in the private/files folder
+#     file_doc = save_file(file.filename, file.read(), "File", random_string(10), is_private=1)
 
-    # Full path to the uploaded file
-    file_path = os.path.join(frappe.get_site_path(), 'private', 'files', file_doc.file_name)
+#     # Full path to the uploaded file
+#     file_path = os.path.join(frappe.get_site_path(), 'private', 'files', file_doc.file_name)
 
-    # Read the CSV file into a DataFrame
-    # Read the CSV file into a DataFrame
-    try:
-        df = pd.read_csv(file_path, encoding='utf-8')  # Default to utf-8 encoding
-    except UnicodeDecodeError:
-        # If there's an encoding error, try using a different encoding, like ISO-8859-1
-        df = pd.read_csv(file_path, encoding='ISO-8859-1')
+#     # Read the CSV file into a DataFrame
+#     # Read the CSV file into a DataFrame
+#     try:
+#         df = pd.read_csv(file_path, encoding='utf-8')  # Default to utf-8 encoding
+#     except UnicodeDecodeError:
+#         # If there's an encoding error, try using a different encoding, like ISO-8859-1
+#         df = pd.read_csv(file_path, encoding='ISO-8859-1')
 
-    columns = list(df.columns)
-    data = df.to_dict(orient="records")
+#     columns = list(df.columns)
+#     data = df.to_dict(orient="records")
 
-    # Dynamically create a DocType and insert data
-    doctype_name = create_dynamic_doctype(file.filename, columns)
-    insert_data_into_doctype(doctype_name, data)
+#     # Dynamically create a DocType and insert data
+#     doctype_name = create_dynamic_doctype(file.filename, columns)
+#     insert_data_into_doctype(doctype_name, data)
 
-    # Prepare data for chart
-    chart_data = prepare_chart_data(df)
+#     # Prepare data for chart
+#     chart_data = prepare_chart_data(df)
 
-    # Return the chart data and the name of the newly created DocType
-    data=json.dumps({
-        "status": "success",
-        "doctype": doctype_name,  # Return the name of the newly created DocType
-        "chart_data": chart_data  # Return the formatted data for charting
-    })
-    json_string = data
-    return json.loads(json_string)
-    #datas["message"] = json.loads(datas["message"])
-    #formatted_json = json.dumps(datas, indent=2)
-    #return datas
+#     # Return the chart data and the name of the newly created DocType
+#     data=json.dumps({
+#         "status": "success",
+#         "doctype": doctype_name,  # Return the name of the newly created DocType
+#         "chart_data": chart_data  # Return the formatted data for charting
+#     })
+#     json_string = data
+#     return json.loads(json_string)
+#     #datas["message"] = json.loads(datas["message"])
+#     #formatted_json = json.dumps(datas, indent=2)
+#     #return datas
 
-import re
+# import re
 
-def create_dynamic_doctype(file_name, columns):
-    """
-    Create a new DocType based on the columns of the uploaded CSV file.
-    Sanitize the columns to remove any special characters that aren't allowed in fieldnames.
-    """
-    doctype_name = f"Data_{file_name.replace('.csv', '').replace('.xlsx', '')}_{random_string(5)}"
+# def create_dynamic_doctype(file_name, columns):
+#     """
+#     Create a new DocType based on the columns of the uploaded CSV file.
+#     Sanitize the columns to remove any special characters that aren't allowed in fieldnames.
+#     """
+#     doctype_name = f"Data_{file_name.replace('.csv', '').replace('.xlsx', '')}_{random_string(5)}"
     
-    if not frappe.db.exists("DocType", doctype_name):
-        # Sanitize the columns to be valid fieldnames
-        fields = []
-        for col in columns:
-            sanitized_fieldname = re.sub(r'\W+', '_', col.lower())  # Replace special characters with underscores
-            sanitized_fieldname = sanitized_fieldname.strip('_')  # Remove leading/trailing underscores
+#     if not frappe.db.exists("DocType", doctype_name):
+#         # Sanitize the columns to be valid fieldnames
+#         fields = []
+#         for col in columns:
+#             sanitized_fieldname = re.sub(r'\W+', '_', col.lower())  # Replace special characters with underscores
+#             sanitized_fieldname = sanitized_fieldname.strip('_')  # Remove leading/trailing underscores
 
-            # Ensure the fieldname doesn't start with a number
-            if sanitized_fieldname[0].isdigit():
-                sanitized_fieldname = f"_{sanitized_fieldname}"
+#             # Ensure the fieldname doesn't start with a number
+#             if sanitized_fieldname[0].isdigit():
+#                 sanitized_fieldname = f"_{sanitized_fieldname}"
 
-            fields.append({
-                "fieldname": sanitized_fieldname,
-                "fieldtype": "Data",
-                "label": col
-            })
+#             fields.append({
+#                 "fieldname": sanitized_fieldname,
+#                 "fieldtype": "Data",
+#                 "label": col
+#             })
 
-        doc = frappe.get_doc({
-            "doctype": "DocType",
-            "name": doctype_name,
-            "module": "Custom",
-            "custom": 1,
-            "fields": fields,
-            "autoname": "autoincrement",
-            "permissions": [{"role": "System Manager", "read": 1, "write": 1, "create": 1}]
-        })
-        doc.insert()
+#         doc = frappe.get_doc({
+#             "doctype": "DocType",
+#             "name": doctype_name,
+#             "module": "Custom",
+#             "custom": 1,
+#             "fields": fields,
+#             "autoname": "autoincrement",
+#             "permissions": [{"role": "System Manager", "read": 1, "write": 1, "create": 1}]
+#         })
+#         doc.insert()
 
-    return doctype_name
+#     return doctype_name
 
 
-def insert_data_into_doctype(doctype_name, data):
-    """
-    Insert data into the newly created DocType dynamically.
-    """
-    for row in data:
-        doc = frappe.get_doc({"doctype": doctype_name})
+# def insert_data_into_doctype(doctype_name, data):
+#     """
+#     Insert data into the newly created DocType dynamically.
+#     """
+#     for row in data:
+#         doc = frappe.get_doc({"doctype": doctype_name})
         
-        for field, value in row.items():
-            doc.set(field.lower().replace(" ", "_"), value)
+#         for field, value in row.items():
+#             doc.set(field.lower().replace(" ", "_"), value)
         
-        doc.insert()
+#         doc.insert()
 
 def prepare_chart_data(df):
     """
