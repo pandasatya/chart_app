@@ -142,11 +142,11 @@ def analyze_sql_query(sql_query: str) -> Dict[str, Any]:
     limit = re.search(r'\blimit\b', sql_final, re.IGNORECASE) is not None
     time_columns = re.findall(r'\b(date|time|year|month|day)\b', sql_final)
     select_clause = re.search(r'select\s+(.+?)\s+from', sql_final, re.DOTALL | re.IGNORECASE)
-    
+
     if not select_clause:
         return {'chart_type': 'table', 'x_axis': '', 'y_axis': ''}
 
-    columns = re.findall(r'(["\w\s/]+?)(?:,|\s+as\s+|\s+from\s+)', select_clause.group(1), re.IGNORECASE)
+    columns = re.findall(r'(["\w\s\./\(\)]+?)(?:,|\s+from\s+|$)', select_clause.group(1) + " ", re.IGNORECASE)
     columns = [col.strip().strip('"') for col in columns]
 
     if aggregations and group_by_match:
@@ -197,7 +197,7 @@ def main_parse_frappe(user_query: str, is_new_data_source: bool,table_name:str,f
         table_name = table_name
         frappe.log_error("table_name",table_name)
         df, table_name = read_frappe_table(table_name,file_upload)
-        
+
         table_schema = get_table_schema(df, table_name,file_upload)
         
 

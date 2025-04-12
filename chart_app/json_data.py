@@ -229,17 +229,27 @@ def prepare_chart_data(products):
     return chart_data
 
 @frappe.whitelist(allow_guest=True)
-def get_table_data(table_name=None, file_upload=False):
+def get_table_data(table_name=None, file_upload=None):
     if table_name:
-        import json
-        if json.loads(file_upload.lower()):
-            frappe.log_error("file_upload",type(json.loads(file_upload.lower())))
-            return convert_uploaded_data_to_chart_dataset(table_name)
+        sanitized_table_name = sanitize_identifier(table_name)
+        if file_upload == "true":
+            return convert_uploaded_data_to_chart_dataset(sanitized_table_name)
         else:
-            data=frappe.db.get_all(table_name,fields=['*'])
+            data = frappe.db.get_all(sanitized_table_name, fields=['*'])
             return convert_dynamic_json_to_chart_dataset(data)
 
-
+def sanitize_identifier(identifier):
+    """
+    Sanitize identifiers (table names, column names) to be SQL-compliant.
+    """
+    # Replace hyphens, spaces and dots with underscores
+    identifier = re.sub(r'[\s\.\-]', '_', identifier)
+    
+    # If identifier starts with a number, prefix it
+    if identifier and identifier[0].isdigit():
+        identifier = "_" + identifier
+    
+    return identifier
 
 import re
 import frappe
